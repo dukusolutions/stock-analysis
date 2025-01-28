@@ -7,341 +7,237 @@ from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.dataframe import dataframe_to_rows
 
-def calculate_technical_indicators(stock_data):
+def identify_value_pattern(stock_data):
     """
-    Calculate technical indicators for trend analysis
+    Identify potential value opportunities similar to CVS pattern
+    Returns a dictionary of pattern indicators and their values
     """
     df = stock_data.copy()
     
-    # Calculate 50-day and 200-day moving averages
-    df['MA50'] = df['Close'].rolling(window=50).mean()
-    df['MA200'] = df['Close'].rolling(window=200).mean()
+    # Calculate key metrics
+    df['52W_High'] = df['Close'].rolling(window=252).max()
+    df['52W_Low'] = df['Close'].rolling(window=252).min()
+    df['Pct_From_52W_High'] = ((df['52W_High'] - df['Close']) / df['52W_High']) * 100
+    df['30D_Vol_Avg'] = df['Volume'].rolling(window=30).mean()
+    df['Volume_Ratio'] = df['Volume'] / df['30D_Vol_Avg']
     
-    # Calculate RSI (14-day)
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df['RSI'] = 100 - (100 / (1 + rs))
+    # Get latest values
+    latest = df.iloc[-1]
     
-    # Calculate MACD
-    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = exp1 - exp2
-    df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    # Define pattern criteria
+    pattern = {
+        'Deep_Value': latest['Pct_From_52W_High'] > 25,  # More than 25% below 52-week high
+        'Near_Support': latest['Close'] <= df['Low'].rolling(window=50).quantile(0.1).iloc[-1],
+        'High_Volume': latest['Volume_Ratio'] > 1.2,  # Above average volume
+        'RSI_Oversold': latest.get('RSI', 50) < 35,  # Oversold condition
+        'Below_MA200': latest['Close'] < latest['MA200'],
+        'Stabilizing': df['Close'].pct_change().rolling(window=5).std().iloc[-1] < 0.02  # Low recent volatility
+    }
     
-    return df
+    # Calculate pattern score (0-100)
+    pattern_score = sum([
+        30 if pattern['Deep_Value'] else 0,
+        20 if pattern['Near_Support'] else 0,
+        15 if pattern['High_Volume'] else 0,
+        15 if pattern['RSI_Oversold'] else 0,
+        10 if pattern['Below_MA200'] else 0,
+        10 if pattern['Stabilizing'] else 0
+    ])
+    
+    pattern['Pattern_Score'] = pattern_score
+    pattern['Pattern_Detected'] = pattern_score >= 60  # Threshold for pattern detection
+    
+    return pattern
 
-def detect_macd_crossover(macd_values, signal_values):
+def calculate_value_metrics(stock_data, fundamental_data):
     """
-    Detect if a MACD crossover occurred in the recent values
-    Returns True if MACD crossed above signal line
+    Calculate comprehensive value metrics combining technical and fundamental data
     """
-    if len(macd_values) < 2 or len(signal_values) < 2:
-        return False
-        
-    # Check if MACD was below signal and is now above
-    was_below = macd_values.iloc[0] < signal_values.iloc[0]
-    is_above = macd_values.iloc[-1] > signal_values.iloc[-1]
+    metrics = {}
     
-    return bool(was_below and is_above)
-
-def get_fundamental_metrics(ticker):
-    """
-    Fetch fundamental metrics from yfinance
-    """
-    try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        
-        return {
-            'Market_Cap': info.get('marketCap'),
-            'PE_Ratio': info.get('forwardPE'),
-            'PEG_Ratio': info.get('pegRatio'),
-            'Price_to_Book': info.get('priceToBook'),
-            'Debt_to_Equity': info.get('debtToEquity'),
-            'Current_Ratio': info.get('currentRatio'),
-            'Profit_Margins': info.get('profitMargins'),
-            'ROE': info.get('returnOnEquity'),
-            'Dividend_Rate': info.get('dividendRate'),
-            'Dividend_Yield': info.get('dividendYield'),
-            'Beta': info.get('beta'),
-            'Sector': info.get('sector'),
-            'Industry': info.get('industry')
-        }
-    except Exception as e:
-        print(f"Error fetching fundamental data for {ticker}: {str(e)}")
-        return {}
-
-def calculate_value_score(metrics):
-    """
-    Calculate a composite value score (0-100) based on fundamental and technical metrics
-    """
-    score = 50  # Start with neutral score
+    # Technical metrics
+    latest = stock_data.iloc[-1]
+    metrics['Price'] = latest['Close']
+    metrics['Pct_From_52W_High'] = ((stock_data['Close'].rolling(window=252).max().iloc[-1] - latest['Close']) /
+                                   stock_data['Close'].rolling(window=252).max().iloc[-1]) * 100
     
-    try:
-        # Helper function to safely get numeric values
-        def safe_float(value):
-            try:
-                if isinstance(value, pd.Series):
-                    return float(value.iloc[0])
-                return float(value) if value is not None and not pd.isna(value) else None
-            except:
-                return None
+    # Fundamental metrics
+    metrics.update(fundamental_data)
+    
+    # Calculate industry relative valuations
+    if 'PE_Ratio' in fundamental_data and 'Industry' in fundamental_data:
+        try:
+            industry_pe = yf.Ticker('^SPX').info.get('forwardPE', 20)  # Use S&P 500 as benchmark
+            metrics['PE_vs_Industry'] = (metrics['PE_Ratio'] / industry_pe - 1) * 100 if metrics['PE_Ratio'] else None
+        except:
+            metrics['PE_vs_Industry'] = None
+    
+    return metrics
 
-        # Fundamental metrics scoring
-        pe_ratio = safe_float(metrics.get('PE_Ratio'))
-        if pe_ratio is not None:
-            if pe_ratio < 15:
-                score += 10
-            elif pe_ratio > 30:
-                score -= 5
-                
-        peg_ratio = safe_float(metrics.get('PEG_Ratio'))
-        if peg_ratio is not None:
-            if peg_ratio < 1:
-                score += 10
-            elif peg_ratio > 2:
-                score -= 5
-                
-        ptb = safe_float(metrics.get('Price_to_Book'))
-        if ptb is not None:
-            if ptb < 3:
-                score += 5
-                
-        div_yield = safe_float(metrics.get('Dividend_Yield'))
-        if div_yield is not None:
-            if div_yield > 0.02:  # 2% yield
-                score += 5
-                
-        roe = safe_float(metrics.get('ROE'))
-        if roe is not None:
-            if roe > 0.15:  # 15% ROE
-                score += 5
-                
-        # Technical metrics scoring
-        rsi = safe_float(metrics.get('RSI'))
-        if rsi is not None:
-            if rsi < 30:
-                score += 10  # Oversold condition
-            elif rsi > 70:
-                score -= 5   # Overbought condition
-                
-        price_vs_ma200 = safe_float(metrics.get('Price_vs_MA200'))
-        if price_vs_ma200 is not None:
-            if price_vs_ma200 < -0.1:  # 10% below 200-day MA
-                score += 10
-                
-        # Trend reversal scoring
-        if metrics.get('MACD_Crossover') is True:  # Explicit boolean check
+def calculate_enhanced_value_score(metrics, pattern_data):
+    """
+    Calculate an enhanced value score incorporating pattern recognition
+    """
+    score = 50  # Base score
+    
+    # Pattern recognition score (0-30 points)
+    pattern_score = pattern_data.get('Pattern_Score', 0)
+    score += pattern_score * 0.3  # Weight pattern score as 30% of total
+    
+    # Traditional value metrics (0-40 points)
+    if metrics.get('PE_Ratio'):
+        if metrics['PE_Ratio'] < 15:
+            score += 10
+        elif metrics['PE_Ratio'] < 20:
             score += 5
             
-    except Exception as e:
-        print(f"Error calculating value score: {str(e)}")
-        return 50  # Return neutral score on error
-        
+    if metrics.get('Dividend_Yield'):
+        div_yield = float(metrics['Dividend_Yield']) if metrics['Dividend_Yield'] else 0
+        if div_yield > 0.04:  # 4% yield
+            score += 10
+        elif div_yield > 0.02:  # 2% yield
+            score += 5
+            
+    if metrics.get('Price_to_Book'):
+        if metrics['Price_to_Book'] < 1.5:
+            score += 10
+        elif metrics['Price_to_Book'] < 3:
+            score += 5
+            
+    if metrics.get('PE_vs_Industry'):
+        if metrics['PE_vs_Industry'] < -20:  # 20% below industry
+            score += 10
+        elif metrics['PE_vs_Industry'] < -10:
+            score += 5
+            
+    # Market position and stability (0-30 points)
+    if metrics.get('Market_Cap'):
+        if metrics['Market_Cap'] > 10e9:  # 10B+ market cap
+            score += 10
+            
+    if metrics.get('Beta'):
+        if metrics['Beta'] < 1.2:  # Lower volatility
+            score += 10
+            
+    if metrics.get('Current_Ratio'):
+        if metrics['Current_Ratio'] > 1.5:
+            score += 10
+            
     return min(max(score, 0), 100)  # Ensure score is between 0 and 100
 
 def analyze_stocks(tickers=None):
     """
-    Enhanced stock analysis with value investing metrics
+    Enhanced stock analysis with pattern recognition
     """
     if tickers is None:
         print("Fetching S&P 500 tickers...")
         sp500 = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
         tickers = sp500['Symbol'].tolist()
-        company_names = dict(zip(sp500['Symbol'], sp500['Security']))
-    else:
-        company_names = {}
-        for ticker in tickers:
-            try:
-                stock = yf.Ticker(ticker)
-                company_names[ticker] = stock.info.get('longName', ticker)
-            except:
-                company_names[ticker] = ticker
-
+    
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=400)
+    start_date = end_date - timedelta(days=365)  # One year of data for better pattern recognition
     
     results = []
     
-    for i, ticker in enumerate(tickers, 1):
+    for ticker in tickers:
         try:
-            print(f"\nProcessing {ticker} ({i}/{len(tickers)})...")
+            print(f"\nAnalyzing {ticker}...")
             
             # Download historical data
             stock = yf.download(ticker, start=start_date, end=end_date, progress=False)
-            
             if stock.empty:
-                print(f"No data found for {ticker}")
                 continue
                 
+            # Get fundamental data
+            fund_data = get_fundamental_metrics(ticker)
+            
             # Calculate technical indicators
-            tech_data = calculate_technical_indicators(stock)
+            stock = calculate_technical_indicators(stock)
             
-            # Get fundamental metrics
-            fund_metrics = get_fundamental_metrics(ticker)
+            # Identify value pattern
+            pattern_data = identify_value_pattern(stock)
             
-            # Current metrics - ensure scalar values
-            current_price = float(tech_data['Close'].iloc[-1])
-            current_ma50 = float(tech_data['MA50'].iloc[-1]) if not pd.isna(tech_data['MA50'].iloc[-1]) else None
-            current_ma200 = float(tech_data['MA200'].iloc[-1]) if not pd.isna(tech_data['MA200'].iloc[-1]) else None
-            current_rsi = float(tech_data['RSI'].iloc[-1]) if not pd.isna(tech_data['RSI'].iloc[-1]) else None
+            # Calculate comprehensive metrics
+            value_metrics = calculate_value_metrics(stock, fund_data)
             
-            # Check for MACD crossover using separate function
-            macd_crossover = detect_macd_crossover(
-                tech_data['MACD'].tail(5),
-                tech_data['Signal_Line'].tail(5)
-            )
+            # Calculate enhanced value score
+            value_score = calculate_enhanced_value_score(value_metrics, pattern_data)
             
-            # Calculate price vs moving averages - ensure scalar values
-            price_vs_ma50 = float((current_price / current_ma50 - 1) * 100) if current_ma50 is not None else None
-            price_vs_ma200 = float((current_price / current_ma200 - 1) * 100) if current_ma200 is not None else None
-            
-            # Combine metrics
-            metrics = {
+            # Combine all metrics
+            result = {
                 'Ticker': ticker,
-                'Company_Name': company_names.get(ticker, ticker),
-                'Current_Price': current_price,
-                'MA50': current_ma50,
-                'MA200': current_ma200,
-                'RSI': current_rsi,
-                'Price_vs_MA50': price_vs_ma50,
-                'Price_vs_MA200': price_vs_ma200,
-                'MACD_Crossover': macd_crossover,
-                **fund_metrics
+                'Analysis_Date': datetime.now().strftime('%Y-%m-%d'),
+                'Current_Price': stock['Close'].iloc[-1],
+                'Value_Score': value_score,
+                'Pattern_Score': pattern_data['Pattern_Score'],
+                'Pattern_Detected': pattern_data['Pattern_Detected'],
+                'Pct_From_52W_High': value_metrics['Pct_From_52W_High'],
+                **fund_data
             }
             
-            # Calculate value score
-            metrics['Value_Score'] = calculate_value_score(metrics)
-            
-            results.append(metrics)
+            results.append(result)
             
         except Exception as e:
-            print(f"Error processing {ticker}: {str(e)}")
+            print(f"Error analyzing {ticker}: {str(e)}")
             continue
     
-    if not results:
-        print("No data was collected. Please check the errors above.")
-        return None
-        
     # Create DataFrame
     df = pd.DataFrame(results)
     
-    # Add analysis timestamp
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    df['Analysis_Date'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    # Add watchlist flags
+    df['Watchlist'] = (df['Pattern_Detected'] & (df['Value_Score'] > 70))
+    df['Priority_Watch'] = (df['Pattern_Detected'] & (df['Value_Score'] > 80))
     
-    # Reorder and select columns for final output
-    columns = [
-        'Analysis_Date',
-        'Ticker',
-        'Company_Name',
-        'Sector',
-        'Industry',
-        'Current_Price',
-        'Value_Score',
-        'PE_Ratio',
-        'PEG_Ratio',
-        'Price_to_Book',
-        'ROE',
-        'Profit_Margins',
-        'Dividend_Yield',
-        'RSI',
-        'Price_vs_MA50',
-        'Price_vs_MA200',
-        'MACD_Crossover',
-        'Beta',
-        'Market_Cap',
-        'Debt_to_Equity',
-        'Current_Ratio'
-    ]
-    
-    # Only include columns that exist in the DataFrame
-    columns = [col for col in columns if col in df.columns]
-    df = df[columns]
-    
-    # Save to Excel
-    excel_filename = f'value_stock_analysis_{timestamp}.xlsx'
-    save_to_excel(df, excel_filename)
-    
-    # Display value opportunities
-    print("\nTop Value Opportunities:")
-    value_columns = ['Ticker', 'Company_Name', 'Value_Score', 'Current_Price', 'PE_Ratio', 'RSI', 'Price_vs_MA200']
-    available_columns = [col for col in value_columns if col in df.columns]
-    value_stocks = df.nlargest(10, 'Value_Score')[available_columns]
-    print(value_stocks)
+    # Save to Excel with enhanced formatting
+    save_to_enhanced_excel(df, 'value_stock_analysis.xlsx')
     
     return df
 
-def save_to_excel(df, filename):
+def save_to_enhanced_excel(df, filename):
     """
-    Save DataFrame to Excel with proper formatting
+    Enhanced Excel output with better formatting and highlighting
     """
-    # Ensure all numeric columns are float or int
-    for col in df.columns:
-        if df[col].dtype == 'object':
-            try:
-                df[col] = pd.to_numeric(df[col], errors='ignore')
-            except:
-                pass
-    
     wb = Workbook()
     ws = wb.active
     ws.title = "Stock Analysis"
     
-    # Convert DataFrame to rows and write to worksheet
-    rows = dataframe_to_rows(df, index=False)
-    for r_idx, row in enumerate(rows, 1):
-        for c_idx, value in enumerate(row, 1):
-            cell = ws.cell(row=r_idx, column=c_idx, value=value)
+    # Define styles
+    header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+    watchlist_fill = PatternFill(start_color="FFE699", end_color="FFE699", fill_type="solid")
+    priority_fill = PatternFill(start_color="F4B084", end_color="F4B084", fill_type="solid")
+    
+    # Write headers
+    headers = list(df.columns)
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=header)
+        cell.fill = header_fill
+        cell.font = Font(bold=True, color="FFFFFF")
+    
+    # Write data
+    for row_idx, row in enumerate(df.values, 2):
+        for col_idx, value in enumerate(row, 1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
             
-            # Format header row
-            if r_idx == 1:
-                cell.fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
-                cell.font = Font(bold=True, color="FFFFFF", size=11)
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-            else:
-                # Format data cells
-                if isinstance(value, (int, float)):
-                    if isinstance(value, float):
-                        if "%" in df.columns[c_idx-1]:
-                            cell.number_format = '0.00"%"'
-                        else:
-                            cell.number_format = '#,##0.00'
-                    else:
-                        cell.number_format = '#,##0'
-                
-                cell.alignment = Alignment(horizontal="right" if isinstance(value, (int, float)) else "left")
+            # Apply watchlist highlighting
+            if headers[col_idx-1] == 'Watchlist' and value:
+                for c in range(1, len(headers) + 1):
+                    ws.cell(row=row_idx, column=c).fill = watchlist_fill
+            
+            # Apply priority watch highlighting
+            if headers[col_idx-1] == 'Priority_Watch' and value:
+                for c in range(1, len(headers) + 1):
+                    ws.cell(row=row_idx, column=c).fill = priority_fill
     
-    # Add borders
-    thin_border = Border(
-        left=Side(style='thin'),
-        right=Side(style='thin'),
-        top=Side(style='thin'),
-        bottom=Side(style='thin')
-    )
-    
-    for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
-        for cell in row:
-            cell.border = thin_border
-    
-    # Adjust column widths
+    # Auto-adjust column widths
     for column in ws.columns:
         max_length = 0
-        column_letter = get_column_letter(column[0].column)
-        
+        column = list(column)
         for cell in column:
             try:
                 max_length = max(max_length, len(str(cell.value)))
             except:
                 pass
-        
-        adjusted_width = max_length + 2
-        ws.column_dimensions[column_letter].width = adjusted_width
-    
-    # Freeze top row
-    ws.freeze_panes = "A2"
+        ws.column_dimensions[get_column_letter(column[0].column)].width = max_length + 2
     
     # Add filters
     ws.auto_filter.ref = ws.dimensions
@@ -350,11 +246,12 @@ def save_to_excel(df, filename):
     wb.save(filename)
 
 if __name__ == "__main__":
-    # Test with a few stocks
-    test_tickers = ['AAPL', 'MSFT', 'GOOGL', 'JPM', 'JNJ']
-    stock_data = analyze_stocks()
+    # Test with some example tickers
+    test_tickers = ['AAPL', 'MSFT', 'GOOGL', 'CVS', 'WBA']
+    results = analyze_stocks(test_tickers)
     
-    if stock_data is not None:
-        print("\nAnalysis complete!")
-    else:
-        print("\nAnalysis failed. Please check the errors above.")
+    # Display watchlist stocks
+    watchlist = results[results['Watchlist']]
+    if not watchlist.empty:
+        print("\nWatchlist Stocks:")
+        print(watchlist[['Ticker', 'Current_Price', 'Value_Score', 'Pattern_Score', 'Pct_From_52W_High']])
