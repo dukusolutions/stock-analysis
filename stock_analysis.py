@@ -5,84 +5,130 @@ from datetime import datetime, timedelta
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-from openpyxl.utils.dataframe import dataframe_to_rows
 
-def identify_value_pattern(stock_data):
+def calculate_technical_indicators(stock_data):
     """
-    Identify potential value opportunities similar to CVS pattern
-    Returns a dictionary of pattern indicators and their values
+    Calculate technical indicators for trend analysis
     """
     df = stock_data.copy()
     
-    # Calculate key metrics
-    df['52W_High'] = df['Close'].rolling(window=252).max()
-    df['52W_Low'] = df['Close'].rolling(window=252).min()
-    df['Pct_From_52W_High'] = ((df['52W_High'] - df['Close']) / df['52W_High']) * 100
-    df['30D_Vol_Avg'] = df['Volume'].rolling(window=30).mean()
-    df['Volume_Ratio'] = df['Volume'] / df['30D_Vol_Avg']
+    # Calculate 50-day and 200-day moving averages
+    df['MA50'] = df['Close'].rolling(window=50).mean()
+    df['MA200'] = df['Close'].rolling(window=200).mean()
     
-    # Get latest values
-    latest = df.iloc[-1]
+    # Calculate RSI (14-day)
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
     
-    # Define pattern criteria
-    pattern = {
-        'Deep_Value': latest['Pct_From_52W_High'] > 25,  # More than 25% below 52-week high
-        'Near_Support': latest['Close'] <= df['Low'].rolling(window=50).quantile(0.1).iloc[-1],
-        'High_Volume': latest['Volume_Ratio'] > 1.2,  # Above average volume
-        'RSI_Oversold': latest.get('RSI', 50) < 35,  # Oversold condition
-        'Below_MA200': latest['Close'] < latest['MA200'],
-        'Stabilizing': df['Close'].pct_change().rolling(window=5).std().iloc[-1] < 0.02  # Low recent volatility
-    }
+    # Calculate MACD
+    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = exp1 - exp2
+    df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
     
-    # Calculate pattern score (0-100)
-    pattern_score = sum([
-        30 if pattern['Deep_Value'] else 0,
-        20 if pattern['Near_Support'] else 0,
-        15 if pattern['High_Volume'] else 0,
-        15 if pattern['RSI_Oversold'] else 0,
-        10 if pattern['Below_MA200'] else 0,
-        10 if pattern['Stabilizing'] else 0
-    ])
+    # Handle any NaN values
+    for col in ['MA50', 'MA200', 'RSI', 'MACD', 'Signal_Line']:
+        df[col] = df[col].fillna(0)
     
-    pattern['Pattern_Score'] = pattern_score
-    pattern['Pattern_Detected'] = pattern_score >= 60  # Threshold for pattern detection
-    
-    return pattern
+    return df
 
-def calculate_value_metrics(stock_data, fundamental_data):
+def identify_value_pattern(stock_data):
     """
-    Calculate comprehensive value metrics combining technical and fundamental data
+    Identify potential value opportunities
+    Returns a dictionary of pattern indicators and their values
     """
-    metrics = {}
-    
-    # Technical metrics
-    latest = stock_data.iloc[-1]
-    metrics['Price'] = latest['Close']
-    metrics['Pct_From_52W_High'] = ((stock_data['Close'].rolling(window=252).max().iloc[-1] - latest['Close']) /
-                                   stock_data['Close'].rolling(window=252).max().iloc[-1]) * 100
-    
-    # Fundamental metrics
-    metrics.update(fundamental_data)
-    
-    # Calculate industry relative valuations
-    if 'PE_Ratio' in fundamental_data and 'Industry' in fundamental_data:
-        try:
-            industry_pe = yf.Ticker('^SPX').info.get('forwardPE', 20)  # Use S&P 500 as benchmark
-            metrics['PE_vs_Industry'] = (metrics['PE_Ratio'] / industry_pe - 1) * 100 if metrics['PE_Ratio'] else None
-        except:
-            metrics['PE_vs_Industry'] = None
-    
-    return metrics
+    try:
+        # Extract scalar values using .iloc[0] for Series
+        current_price = stock_data['Close'].iloc[-1]
+        high_price = stock_data['High'].max()
+        low_price = stock_data['Low'].min()
+        avg_volume = stock_data['Volume'].mean()
+        current_volume = stock_data['Volume'].iloc[-1]
+        current_rsi = stock_data['RSI'].iloc[-1]
+        current_ma200 = stock_data['MA200'].iloc[-1]
+        volatility = stock_data['Close'].pct_change().std()
+        
+        # Calculate base metrics
+        pct_from_high = ((high_price - current_price) / high_price * 100)
+        volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1.0
+        
+        # Pattern checks
+        pattern = {
+            'Deep_Value': pct_from_high > 25,
+            'High_Volume': volume_ratio > 1.2,
+            'RSI_Oversold': current_rsi < 35,
+            'Near_Support': current_price <= low_price * 1.05,
+            'Below_MA200': current_price < current_ma200,
+            'Stabilizing': volatility < 0.02
+        }
+        
+        # Calculate pattern score
+        pattern_score = sum([
+            30 if pattern['Deep_Value'] else 0,
+            20 if pattern['Near_Support'] else 0,
+            15 if pattern['High_Volume'] else 0,
+            15 if pattern['RSI_Oversold'] else 0,
+            10 if pattern['Below_MA200'] else 0,
+            10 if pattern['Stabilizing'] else 0
+        ])
+        
+        pattern['Pattern_Score'] = float(pattern_score)
+        pattern['Pattern_Detected'] = pattern_score >= 60
+        
+        return pattern
+        
+    except Exception as e:
+        print(f"Warning in pattern identification: {str(e)}")
+        return {
+            'Deep_Value': False,
+            'Near_Support': False,
+            'High_Volume': False,
+            'RSI_Oversold': False,
+            'Below_MA200': False,
+            'Stabilizing': False,
+            'Pattern_Score': 0.0,
+            'Pattern_Detected': False
+        }
+
+def get_fundamental_metrics(ticker):
+    """
+    Fetch fundamental metrics from yfinance
+    """
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        
+        return {
+            'Market_Cap': info.get('marketCap'),
+            'PE_Ratio': info.get('forwardPE'),
+            'PEG_Ratio': info.get('pegRatio'),
+            'Price_to_Book': info.get('priceToBook'),
+            'Debt_to_Equity': info.get('debtToEquity'),
+            'Current_Ratio': info.get('currentRatio'),
+            'Profit_Margins': info.get('profitMargins'),
+            'ROE': info.get('returnOnEquity'),
+            'Dividend_Rate': info.get('dividendRate'),
+            'Dividend_Yield': info.get('dividendYield'),
+            'Beta': info.get('beta'),
+            'Sector': info.get('sector'),
+            'Industry': info.get('industry')
+        }
+    except Exception as e:
+        print(f"Error fetching fundamental data for {ticker}: {str(e)}")
+        return {}
 
 def calculate_enhanced_value_score(metrics, pattern_data):
     """
-    Calculate an enhanced value score incorporating pattern recognition
+    Calculate an enhanced value score incorporating both fundamental and technical factors
     """
     score = 50  # Base score
     
     # Pattern recognition score (0-30 points)
     pattern_score = pattern_data.get('Pattern_Score', 0)
-    score += pattern_score * 0.3  # Weight pattern score as 30% of total
+    score += pattern_score * 0.3
     
     # Traditional value metrics (0-40 points)
     if metrics.get('PE_Ratio'):
@@ -103,13 +149,7 @@ def calculate_enhanced_value_score(metrics, pattern_data):
             score += 10
         elif metrics['Price_to_Book'] < 3:
             score += 5
-            
-    if metrics.get('PE_vs_Industry'):
-        if metrics['PE_vs_Industry'] < -20:  # 20% below industry
-            score += 10
-        elif metrics['PE_vs_Industry'] < -10:
-            score += 5
-            
+    
     # Market position and stability (0-30 points)
     if metrics.get('Market_Cap'):
         if metrics['Market_Cap'] > 10e9:  # 10B+ market cap
@@ -125,9 +165,9 @@ def calculate_enhanced_value_score(metrics, pattern_data):
             
     return min(max(score, 0), 100)  # Ensure score is between 0 and 100
 
-def analyze_stocks(tickers=None):
+def analyze_stocks(tickers=None, lookback_days=365):
     """
-    Enhanced stock analysis with pattern recognition
+    Comprehensive stock analysis combining technical and fundamental factors
     """
     if tickers is None:
         print("Fetching S&P 500 tickers...")
@@ -135,7 +175,8 @@ def analyze_stocks(tickers=None):
         tickers = sp500['Symbol'].tolist()
     
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=365)  # One year of data for better pattern recognition
+    start_date = end_date - timedelta(days=lookback_days)
+    print(f"\nFetching data from {start_date.date()} to {end_date.date()}")
     
     results = []
     
@@ -146,34 +187,92 @@ def analyze_stocks(tickers=None):
             # Download historical data
             stock = yf.download(ticker, start=start_date, end=end_date, progress=False)
             if stock.empty:
+                print(f"No data found for {ticker}")
                 continue
                 
+            # Handle multi-level columns - flatten the structure
+            stock.columns = [col[0] for col in stock.columns]
+            
+            print("\nColumn names after cleanup:", stock.columns.tolist())
+            print("\nFirst few rows of cleaned data:")
+            print(stock.head())
+                
+            # Calculate technical indicators
+            stock = calculate_technical_indicators(stock)
+            
+            # Get pattern data
+            pattern_data = identify_value_pattern(stock)
+            
             # Get fundamental data
             fund_data = get_fundamental_metrics(ticker)
+            
+            print(f"\nDebug data for {ticker}:")
             
             # Calculate technical indicators
             stock = calculate_technical_indicators(stock)
             
-            # Identify value pattern
+            # Get clean scalar values
+            current_price = stock['Close'].iloc[-1]
+            high_price = stock['High'].max()
+            low_price = stock['Low'].min()
+            
+            print(f"Current price: {current_price}")
+            print(f"High price: {high_price}")
+            print(f"Low price: {low_price}")
+            
+            # Calculate 52-week high
+            fifty_two_week_high = stock['High'].rolling(window=252, min_periods=1).max().iloc[-1]
+            
+            print(f"52-week high: {fifty_two_week_high}")
+            
+            # Calculate percentage from high
+            if fifty_two_week_high > 0:
+                pct_from_high = ((fifty_two_week_high - current_price) / fifty_two_week_high) * 100
+                print(f"Calculated percentage from high: {pct_from_high:.2f}%")
+            else:
+                print("Invalid 52-week high value")
+                pct_from_high = 0.0
+                
+            # Get pattern data
             pattern_data = identify_value_pattern(stock)
             
-            # Calculate comprehensive metrics
-            value_metrics = calculate_value_metrics(stock, fund_data)
-            
-            # Calculate enhanced value score
-            value_score = calculate_enhanced_value_score(value_metrics, pattern_data)
-            
-            # Combine all metrics
+            # Create result dictionary with scalar values
             result = {
-                'Ticker': ticker,
+                'Ticker': str(ticker),
                 'Analysis_Date': datetime.now().strftime('%Y-%m-%d'),
-                'Current_Price': stock['Close'].iloc[-1],
-                'Value_Score': value_score,
+                'Current_Price': current_price,
+                'Value_Score': calculate_enhanced_value_score(fund_data, pattern_data),
                 'Pattern_Score': pattern_data['Pattern_Score'],
-                'Pattern_Detected': pattern_data['Pattern_Detected'],
-                'Pct_From_52W_High': value_metrics['Pct_From_52W_High'],
-                **fund_data
+                'Pct_From_52W_High': pct_from_high,
+                'Pattern_Detected': pattern_data['Pattern_Detected']
             }
+            
+            # Handle any NaN values in the data
+            if np.isnan(pct_from_high):
+                pct_from_high = 0.0
+                
+            # Create result dictionary with proper scalar values
+            result = {
+                'Ticker': str(ticker),
+                'Analysis_Date': datetime.now().strftime('%Y-%m-%d'),
+                'Current_Price': float(current_price),
+                'Value_Score': float(calculate_enhanced_value_score(fund_data, pattern_data)),
+                'Pattern_Score': float(pattern_data['Pattern_Score']),
+                'Pct_From_52W_High': float(pct_from_high),
+                'Pattern_Detected': bool(pattern_data['Pattern_Detected'])
+            }
+            
+            # Add pattern detection results
+            for key in ['Deep_Value', 'Near_Support', 'High_Volume', 
+                       'RSI_Oversold', 'Below_MA200', 'Stabilizing']:
+                result[key] = bool(pattern_data.get(key, False))
+            
+            # Add fundamental metrics
+            for key, value in fund_data.items():
+                if isinstance(value, (int, float)):
+                    result[key] = float(value) if value is not None else None
+                else:
+                    result[key] = value
             
             results.append(result)
             
@@ -184,18 +283,22 @@ def analyze_stocks(tickers=None):
     # Create DataFrame
     df = pd.DataFrame(results)
     
-    # Add watchlist flags
-    df['Watchlist'] = (df['Pattern_Detected'] & (df['Value_Score'] > 70))
-    df['Priority_Watch'] = (df['Pattern_Detected'] & (df['Value_Score'] > 80))
+    # Calculate watchlist flags
+    if not df.empty:
+        df['Watchlist'] = (df['Pattern_Score'] > 60) & (df['Value_Score'] > 70)
+        df['Priority_Watch'] = (df['Pattern_Score'] > 70) & (df['Value_Score'] > 80)
     
-    # Save to Excel with enhanced formatting
-    save_to_enhanced_excel(df, 'value_stock_analysis.xlsx')
+    # Add timestamp to filename
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    # Save to Excel
+    save_to_enhanced_excel(df, f'stock_analysis_{timestamp}.xlsx')
     
     return df
 
 def save_to_enhanced_excel(df, filename):
     """
-    Enhanced Excel output with better formatting and highlighting
+    Save analysis results to Excel with enhanced formatting
     """
     wb = Workbook()
     ws = wb.active
@@ -213,7 +316,7 @@ def save_to_enhanced_excel(df, filename):
         cell.fill = header_fill
         cell.font = Font(bold=True, color="FFFFFF")
     
-    # Write data
+    # Write data with conditional formatting
     for row_idx, row in enumerate(df.values, 2):
         for col_idx, value in enumerate(row, 1):
             cell = ws.cell(row=row_idx, column=col_idx, value=value)
@@ -246,12 +349,35 @@ def save_to_enhanced_excel(df, filename):
     wb.save(filename)
 
 if __name__ == "__main__":
-    # Test with some example tickers
-    test_tickers = ['AAPL', 'MSFT', 'GOOGL', 'CVS', 'WBA']
-    results = analyze_stocks(test_tickers)
+    # Test with just two tickers for detailed debugging
+    test_tickers = ['AAPL', 'MSFT']
+    results = analyze_stocks()
     
-    # Display watchlist stocks
-    watchlist = results[results['Watchlist']]
-    if not watchlist.empty:
-        print("\nWatchlist Stocks:")
-        print(watchlist[['Ticker', 'Current_Price', 'Value_Score', 'Pattern_Score', 'Pct_From_52W_High']])
+    print("\nRaw DataFrame Contents:")
+    pd.set_option('display.max_columns', None)
+    pd.set_option('display.width', None)
+    print(results)
+    
+    print("\nAnalysis Results:")
+    if not results.empty:
+        # Display relevant columns
+        display_columns = ['Ticker', 'Current_Price', 'Value_Score', 
+                         'Pattern_Score', 'Pct_From_52W_High', 'Pattern_Detected']
+        
+        # Display all results
+        print("\nAll analyzed stocks:")
+        print(results[display_columns].to_string())
+        
+        # Display high value opportunities
+        high_value = results[results['Value_Score'] > 70]
+        if not high_value.empty:
+            print("\nHigh Value Opportunities:")
+            print(high_value[display_columns].to_string())
+        
+        # Display strong pattern matches
+        strong_pattern = results[results['Pattern_Score'] > 60]
+        if not strong_pattern.empty:
+            print("\nStrong Pattern Matches:")
+            print(strong_pattern[display_columns].to_string())
+    else:
+        print("No results were found. Please check the errors above.")
