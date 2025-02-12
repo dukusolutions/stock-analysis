@@ -31,6 +31,7 @@ def calculate_technical_indicators(stock_data):
     
     # Handle any NaN values
     for col in ['MA50', 'MA200', 'RSI', 'MACD', 'Signal_Line']:
+
         df[col] = df[col].fillna(0)
     
     return df
@@ -184,44 +185,42 @@ def analyze_stocks(tickers=None, lookback_days=365):
         try:
             print(f"\nAnalyzing {ticker}...")
             
+            # Create ticker object first
+            ticker_obj = yf.Ticker(ticker)
+            
             # Download historical data
-            stock = yf.download(ticker, start=start_date, end=end_date, progress=False)
-            if stock.empty:
+            stock_data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+            if stock_data.empty:
                 print(f"No data found for {ticker}")
                 continue
                 
             # Handle multi-level columns - flatten the structure
-            stock.columns = [col[0] for col in stock.columns]
+            stock_data.columns = [col[0] for col in stock_data.columns]
             
-            print("\nColumn names after cleanup:", stock.columns.tolist())
+            print("\nColumn names after cleanup:", stock_data.columns.tolist())
             print("\nFirst few rows of cleaned data:")
-            print(stock.head())
+            print(stock_data.head())
                 
             # Calculate technical indicators
-            stock = calculate_technical_indicators(stock)
+            stock_data = calculate_technical_indicators(stock_data)
             
             # Get pattern data
-            pattern_data = identify_value_pattern(stock)
+            pattern_data = identify_value_pattern(stock_data)
             
             # Get fundamental data
             fund_data = get_fundamental_metrics(ticker)
             
-            print(f"\nDebug data for {ticker}:")
-            
-            # Calculate technical indicators
-            stock = calculate_technical_indicators(stock)
-            
             # Get clean scalar values
-            current_price = stock['Close'].iloc[-1]
-            high_price = stock['High'].max()
-            low_price = stock['Low'].min()
+            current_price = stock_data['Close'].iloc[-1]
+            high_price = stock_data['High'].max()
+            low_price = stock_data['Low'].min()
             
             print(f"Current price: {current_price}")
             print(f"High price: {high_price}")
             print(f"Low price: {low_price}")
             
             # Calculate 52-week high
-            fifty_two_week_high = stock['High'].rolling(window=252, min_periods=1).max().iloc[-1]
+            fifty_two_week_high = stock_data['High'].rolling(window=252, min_periods=1).max().iloc[-1]
             
             print(f"52-week high: {fifty_two_week_high}")
             
@@ -232,27 +231,10 @@ def analyze_stocks(tickers=None, lookback_days=365):
             else:
                 print("Invalid 52-week high value")
                 pct_from_high = 0.0
-                
-            # Get pattern data
-            pattern_data = identify_value_pattern(stock)
             
             # Create result dictionary with scalar values
             result = {
-                'Ticker': str(ticker),
-                'Analysis_Date': datetime.now().strftime('%Y-%m-%d'),
-                'Current_Price': current_price,
-                'Value_Score': calculate_enhanced_value_score(fund_data, pattern_data),
-                'Pattern_Score': pattern_data['Pattern_Score'],
-                'Pct_From_52W_High': pct_from_high,
-                'Pattern_Detected': pattern_data['Pattern_Detected']
-            }
-            
-            # Handle any NaN values in the data
-            if np.isnan(pct_from_high):
-                pct_from_high = 0.0
-                
-            # Create result dictionary with proper scalar values
-            result = {
+                'Company': ticker_obj.info.get('shortName', ticker),  # Use get() with default value
                 'Ticker': str(ticker),
                 'Analysis_Date': datetime.now().strftime('%Y-%m-%d'),
                 'Current_Price': float(current_price),
@@ -361,7 +343,7 @@ if __name__ == "__main__":
     print("\nAnalysis Results:")
     if not results.empty:
         # Display relevant columns
-        display_columns = ['Ticker', 'Current_Price', 'Value_Score', 
+        display_columns = ['Company', 'Ticker', 'Current_Price', 'Value_Score', 
                          'Pattern_Score', 'Pct_From_52W_High', 'Pattern_Detected']
         
         # Display all results
